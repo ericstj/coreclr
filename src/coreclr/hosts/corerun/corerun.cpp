@@ -13,6 +13,7 @@
 #include <Logger.h>
 #include "palclr.h"
 #include "sstring.h"
+#include "bundle.h"
 
 // Utility macro for testing whether or not a flag is set.
 #define HAS_FLAG(value, flag) (((value) & (flag)) == (flag))
@@ -40,7 +41,7 @@ class HostEnvironment
 
     // The path to the directory containing this module
     PathString m_hostDirectoryPath;
-
+    
     // The name of this module, without the path
     const wchar_t *m_hostExeName;
 
@@ -53,6 +54,8 @@ class HostEnvironment
 
     Logger *m_log;
 
+    // Directory where bundled files are extracted
+    const wchar_t *m_unbundleDir;
 
     // Attempts to load CoreCLR.dll from the given directory.
     // On success pins the dll, sets m_coreCLRDirectoryPath and returns the HMODULE.
@@ -90,8 +93,8 @@ public:
     // The path to the directory that CoreCLR is in
     PathString m_coreCLRDirectoryPath;
 
-    HostEnvironment(Logger *logger) 
-        : m_log(logger), m_CLRRuntimeHost(nullptr) {
+    HostEnvironment(Logger *logger, const wchar_t *unbundleDir = nullptr) 
+        : m_log(logger), m_unbundleDir(unbundleDir), m_CLRRuntimeHost(nullptr) {
 
             // Discover the path to this exe's module. All other files are expected to be in the same directory.
             WszGetModuleFileName(::GetModuleHandleW(nullptr), m_hostPath);
@@ -111,7 +114,12 @@ public:
             // Check for %CORE_ROOT% and try to load CoreCLR.dll from it if it is set
             StackSString coreRoot;
 			m_coreCLRModule = NULL; // Initialize this here since we don't call TryLoadCoreCLR if CORE_ROOT is unset.
-            if (WszGetEnvironmentVariable(W("CORE_ROOT"), coreRoot) > 0 && coreRoot.GetCount() > 0)
+
+            if (m_unbundleDir != NULL)
+            {
+                m_coreCLRModule = TryLoadCoreCLR(m_unbundleDir);
+            }
+            else if (WszGetEnvironmentVariable(W("CORE_ROOT"), coreRoot) > 0 && coreRoot.GetCount() > 0)
             {
                 coreRoot.Append(W('\\'));
                 m_coreCLRModule = TryLoadCoreCLR(coreRoot);
@@ -365,20 +373,20 @@ STARTUP_FLAGS CreateStartupFlags() {
     return initialFlags;
 }
 
-bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbose, const bool waitForDebugger, DWORD &exitCode)
+bool TryRun(const wchar_t* exeName, const wchar_t* bundleDir, const int argc, const wchar_t* argv[], 
+            Logger &log, const bool verbose, const bool waitForDebugger, DWORD &exitCode)
 {
 
     // Assume failure
     exitCode = -1;
 
-    HostEnvironment hostEnvironment(&log);
+    HostEnvironment hostEnvironment(&log, bundleDir);
 
     //-------------------------------------------------------------
 
     // Find the specified exe. This is done using LoadLibrary so that
     // the OS library search semantics are used to find it.
 
-    const wchar_t* exeName = argc > 0 ? argv[0] : nullptr;
     if(exeName == nullptr)
     {
         log << W("No exename specified.") << Logger::endl;
@@ -578,7 +586,7 @@ bool TryRun(const int argc, const wchar_t* argv[], Logger &log, const bool verbo
         }
     }
 
-    hr = host->ExecuteAssembly(domainId, managedAssemblyFullName, argc-1, (argc-1)?&(argv[1]):NULL, &exitCode);
+    hr = host->ExecuteAssembly(domainId, managedAssemblyFullName, argc, (argc)?argv:NULL, &exitCode);
     if (FAILED(hr)) {
         log << W("Failed call to ExecuteAssembly. ERRORCODE: ") << Logger::hresult << hr << Logger::endl;
         return false;
@@ -637,6 +645,7 @@ void showHelp() {
         W("USAGE: coreRun [/d] [/v] Managed.exe\r\n")
         W("\r\n")
         W("  where Managed.exe is a managed executable built for CoreCLR\r\n")
+        W("        Managed.exe need not be specified if this is a bundled host\r\n")
         W("        /v causes verbose output to be written to the console\r\n")
         W("        /d causes coreRun to wait for a debugger to attach before\r\n")
         W("         launching Managed.exe\r\n")
@@ -647,10 +656,185 @@ void showHelp() {
         );
 }
 
+class Extractor
+{
+public:
+    Extractor(Logger *log)
+        :Log(log), m_bundle(NULL)
+    {
+    }
+
+private:
+    static BOOL CALLBACK SpillEmbeddedResource(HMODULE bundle, LPCWSTR type, LPWSTR name, LONG_PTR extractor)
+    {
+        Extractor *extract = (Extractor *)extractor;
+        Logger *log = extract->Log;
+
+        TCHAR szBuffer[80];  // print buffer for info file
+        DWORD cbWritten;     // number of bytes written to resource info file
+        size_t cbString;
+        HRESULT hResult;
+
+        HRSRC resource = WszFindResource(bundle, name, type);
+        assert(resource != NULL);
+
+        HGLOBAL loadedResource = LoadResource(bundle, resource);
+        if (loadedResource == NULL)
+        {
+            *log << W("Error Loading embedded resource: ") << name << Logger::endl;
+            *log << W("Error code: ") << GetLastError() << Logger::endl;
+            return false;
+        }
+
+        LPBYTE lockedResource = (LPBYTE)LockResource(loadedResource);
+        if (lockedResource == NULL)
+        {
+            *log << W("Error Locking embedded resource: ") << name << Logger::endl;
+            *log << W("Error code: ") << GetLastError() << Logger::endl;
+            return false;
+        }
+
+        DWORD resourceSize = SizeofResource(bundle, resource);
+        PathString fileName(extract->UnbundleDir);
+        fileName.Append(name);
+ 
+        HANDLE file = WszCreateFile(fileName, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (file == INVALID_HANDLE_VALUE)
+        {
+            *log << W("Error creating Spill file: ") << fileName << Logger::endl;
+            *log << W("Error code: ") << GetLastError() << Logger::endl;
+            return false;
+        }
+
+        DWORD writtenSize;
+        BOOL written = WriteFile(file, lockedResource, resourceSize, &writtenSize, NULL);
+        if (!written)
+        {
+            *log << W("Error writing Spill file: ") << fileName << Logger::endl;
+            *log << W("Error code: ") << GetLastError() << Logger::endl;
+            return false;
+        }
+
+        BOOL closed = CloseHandle(file);
+        if (!closed)
+        {
+            *log << W("Error closing Spill file: ") << fileName << Logger::endl;
+            *log << W("Error code: ") << GetLastError() << Logger::endl;
+            return false;
+        }
+
+        return true;
+    }
+
+    bool ProcessManifest()
+    {
+        HRSRC resource = WszFindResource(m_bundle, L"Manifest", RT_EMBED_MANIFEST);
+        if (resource == NULL)
+        {
+            *Log << W("No Embed_Manifest, not a bundle") << Logger::endl;
+            return false;
+        }
+
+        HGLOBAL loadedResource = LoadResource(m_bundle, resource);
+        if (loadedResource == NULL)
+        {
+            *Log << W("Failed to load Bundle Manifest") << Logger::endl;
+            return false;
+        }
+
+        const wchar_t* lockedResource = (const wchar_t*)LockResource(loadedResource);
+        if (lockedResource == NULL)
+        {
+            *Log << W("Failed to read Bundle Manifest") << Logger::endl;
+            return false;
+        }
+
+        SString manifest(lockedResource);
+        SString::CIterator line = manifest.Begin();
+
+        if (!manifest.Find(line, '\n'))
+        {
+            // Manifest fount, but no AppName!
+            *Log << W("Failure: Malformed bundle manifest") << Logger::endl;
+            return false;
+        }
+        AppName.Set(manifest, manifest.Begin(), line);
+
+        wchar_t tmpPath[256];
+        DWORD pathLen = GetTempPathW(256, tmpPath);
+        if (pathLen == 0)
+        {
+            *Log << W("Couldn't find tmp directory") << Logger::endl;
+            return false;
+        }
+        else if (pathLen > 256)
+        {
+            *Log << W("Path to tmp directory is too long") << Logger::endl;
+            return false;
+        }
+        
+        UnbundleDir.Set(tmpPath);
+        UnbundleDir.Append(W("\\"));
+        UnbundleDir.Append(AppName);
+        UnbundleDir.Append(W("\\"));
+
+        WszCreateDirectory(UnbundleDir, NULL);
+
+        PathString dir;
+        SString::CIterator prevLine = ++line;
+
+        for (BOOL found = manifest.Find(line, L'\n'); found; found = manifest.Find(line, L'\n'))
+        {
+            dir.Set(manifest, prevLine, line);
+            PathString fullName(UnbundleDir);
+            fullName.Append(dir);
+            WszCreateDirectory(fullName, NULL);
+            prevLine = ++line;
+        }
+
+        return true;
+    }
+
+public:
+    bool UnBundle()
+    {
+        WszGetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, NULL, &m_bundle);
+        if (m_bundle == NULL)
+        {
+            *Log << W("Failed to scan for embedded resources") << Logger::endl;
+            *Log << W("Error code: ") << GetLastError() << Logger::endl;
+            return false;
+        }
+
+        if (!ProcessManifest())
+        {
+            return false;
+        }
+
+        if (!WszEnumResourceNames(m_bundle, RT_EMBED, SpillEmbeddedResource, (LONG_PTR)Log))
+        {
+            *Log << W("Failed to process embedded resources") << Logger::endl;
+            *Log << W("Error code: ") << GetLastError() << Logger::endl;
+            return false;
+        }
+
+        return true;
+    }
+
+    PathString AppName;
+    PathString UnbundleDir;
+    PathString WorkingDir;
+    Logger *Log;
+
+private:
+
+    HMODULE m_bundle;
+
+};
+
 int __cdecl wmain(const int argc, const wchar_t* argv[])
 {
     // Parse the options from the command line
-
     bool verbose = false;
     bool waitForDebugger = false;
     bool helpRequested = false;
@@ -681,19 +865,33 @@ int __cdecl wmain(const int argc, const wchar_t* argv[])
         newArgv++;
     }
 
-    if (argc < 2 || helpRequested || newArgc==0) {
+    Logger log;
+    if (verbose) {
+        log.Enable();
+    }
+    else {
+        log.Disable();
+    }
+
+    const wchar_t* exeName = nullptr;
+    Extractor extractor(&log);
+    if (extractor.UnBundle())
+    {
+        exeName = extractor.AppName.GetUnicode();
+    }
+    else if (newArgc > 0)
+    {
+        exeName = newArgv++[0];
+        newArgc--;
+    }
+
+    if ((exeName==nullptr) || helpRequested) {
         showHelp();
         return -1;
     } else {
-        Logger log;
-        if (verbose) {
-            log.Enable();
-        } else {
-            log.Disable();
-        }
 
         DWORD exitCode;
-        auto success = TryRun(newArgc, newArgv, log, verbose, waitForDebugger, exitCode);
+        auto success = TryRun(exeName, extractor.UnbundleDir, newArgc, newArgv, log, verbose, waitForDebugger, exitCode);
 
         log << W("Execution ") << (success ? W("succeeded") : W("failed")) << Logger::endl;
 

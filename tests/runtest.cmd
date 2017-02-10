@@ -83,6 +83,7 @@ if /i "%1" == "link"                  (set DoLink=true&set ILLINK=%2&shift&shift
 if /i "%1" == "tieredcompilation"     (set COMPLUS_TieredCompilation=1&shift&goto Arg_Loop)
 if /i "%1" == "gcname"                (set COMPlus_GCName=%2&shift&shift&goto Arg_Loop)
 if /i "%1" == "timeout"               (set __TestTimeout=%2&shift&shift&goto Arg_Loop)
+if /i "%1" == "bundle"                (set DoBundle=true&shift&goto Arg_Loop)
 
 REM change it to COMPlus_GCStress when we stop using xunit harness
 if /i "%1" == "gcstresslevel"         (set __GCSTRESSLEVEL=%2&set __TestTimeout=1800000&shift&shift&goto Arg_Loop)
@@ -106,6 +107,12 @@ shift
 
 if defined __TestEnv (if not exist %__TestEnv% echo %__MsgPrefix%Error: Test Environment script %__TestEnv% not found && exit /b 1)
 if "%__PerfTests%"=="true" (if defined __GenerateLayoutOnly echo %__MsgPrefix%Error: Don't specify both "PerfTests" and "GenerateLayoutOnly" && exit /b 1)
+if defined DoBundle (
+    if not defined DoLink (
+        echo Error: Cannot Bundle without Linking
+        goto Usage
+    )
+)
 
 :: Set the remaining variables based upon the determined configuration
 set "__BinDir=%__RootBinDir%\Product\%__BuildOS%.%__BuildArch%.%__BuildType%"
@@ -500,6 +507,7 @@ echo sequential                - Run tests sequentially (no parallelism).
 echo crossgen                  - Precompile ^(crossgen^) the managed assemblies in CORE_ROOT before running the tests.
 echo crossgenaltjit ^<altjit^>   - Precompile ^(crossgen^) the managed assemblies in CORE_ROOT before running the tests, using the given altjit.
 echo link ^<ILlink^>             - Runs the tests after linking via the IL linker ^<ILlink^>.
+echo bundle                    - Runs the tests after bundling (requires linking)
 echo RunCrossgenTests          - Runs ReadytoRun tests
 echo jitstress ^<n^>             - Runs the tests with COMPlus_JitStress=n
 echo jitstressregs ^<n^>         - Runs the tests with COMPlus_JitStressRegs=n

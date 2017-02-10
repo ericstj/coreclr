@@ -182,6 +182,7 @@ Exit /b 0
 REM Linker commands
 
 set LinkBin=__Link
+set BundleBin=__Bundle
 set Assemblies=-a System.Private.CoreLib
 
 IF defined DoLink ( 
@@ -193,6 +194,7 @@ IF defined DoLink (
     
     REM Clean up old Linked binaries, if any
     IF EXIST %LinkBin% rmdir /s /q %LinkBin%
+    IF defined DoBundle IF EXIST %BundleBin% rmdir /s /q %BundleBin%
     
     REM Remove Native images, since the goal is to run from Linked binaries
     del /q /f *.ni.* 2> nul
@@ -214,6 +216,14 @@ IF defined DoLink (
       IF NOT defined KeepLinkedBinaries (
           IF EXIST %LinkBin% rmdir /s /q %LinkBin%
       )
+      if not defined KeepBundle (
+          IF EXIST %BundleBin% rmdir /s /q %BundleBin%
+      )
+      if not defined KeepBundleExtract (
+          set BundleExtract=%TMP%\$(InputAssemblyName)
+          IF EXIST !BundleExtract! rmdir /s /q !BundleExtract!
+      )
+
       popd
       Exit /b 1
     )
@@ -222,10 +232,22 @@ IF defined DoLink (
     copy %CORE_ROOT%\clrjit.dll %LinkBin% > nul 2> nul
     copy %CORE_ROOT%\coreclr.dll %LinkBin% > nul 2> nul
     copy %CORE_ROOT%\mscorrc.dll %LinkBin% > nul 2> nul
-    copy %CORE_ROOT%\CoreRun.exe %LinkBin% > nul 2> nul
 
     REM Copy some files that may be arguments
     copy *.txt %LinkBin% > nul 2> nul
+
+    IF defined DoBundle ( 
+        echo %CORE_ROOT%\bundle.exe -a $(InputAssemblyName) -r %LinkBin% -h %CORE_ROOT%\CoreRun.exe -o %BundleBin%\$(InputAssemblyName)
+        %CORE_ROOT%\bundle.exe -a $(InputAssemblyName) -r %LinkBin% -h %CORE_ROOT%\CoreRun.exe -o %BundleBin%\$(InputAssemblyName)
+    
+        set ExePath=%BundleBin%\$(InputAssemblyName)
+        set CORE_ROOT=
+    ) ELSE ( 
+        copy %CORE_ROOT%\CoreRun.exe %LinkBin% > nul 2> nul
+        
+        set ExePath=%LinkBin%\$(InputAssemblyName)
+        set CORE_ROOT=%~dp0%LinkBin%
+    )
 
     set ExePath=%LinkBin%\$(InputAssemblyName)
     set CORE_ROOT=%~dp0%LinkBin%
@@ -241,6 +263,13 @@ if defined DoLink (
     if not defined KeepLinkedBinaries (
         IF EXIST %LinkBin% rmdir /s /q %LinkBin%
     )
+    if not defined KeepBundle (
+        IF EXIST %BundleBin% rmdir /s /q %BundleBin%
+    )
+    if not defined KeepBundleExtract (
+        set BundleExtract=%TMP%\$(InputAssemblyName)
+        IF EXIST !BundleExtract! rmdir /s /q !BundleExtract!
+    )    
 )              
 ]]>
           </BatchLinkerTestCleanupCmds>
@@ -248,7 +277,9 @@ if defined DoLink (
       <PropertyGroup>      
       <_CLRTestRunFile Condition="'$(CLRTestIsHosted)'=='true'">"%CORE_ROOT%\corerun.exe"</_CLRTestRunFile>
       <BatchCLRTestLaunchCmds><![CDATA[
-IF NOT "%CLRCustomTestLauncher%"=="" (
+IF DEFINED DoBundle (
+  set LAUNCHER=
+) ELSE IF NOT "%CLRCustomTestLauncher%"=="" (
   set LAUNCHER=call %CLRCustomTestLauncher% %~dp0
 ) ELSE (
   set LAUNCHER=%_DebuggerFullPath% $(_CLRTestRunFile)
