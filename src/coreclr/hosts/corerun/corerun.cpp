@@ -811,7 +811,7 @@ public:
             return false;
         }
 
-        if (!WszEnumResourceNames(m_bundle, RT_EMBED, SpillEmbeddedResource, (LONG_PTR)Log))
+        if (!WszEnumResourceNames(m_bundle, RT_EMBED, SpillEmbeddedResource, (LONG_PTR)this))
         {
             *Log << W("Failed to process embedded resources") << Logger::endl;
             *Log << W("Error code: ") << GetLastError() << Logger::endl;
