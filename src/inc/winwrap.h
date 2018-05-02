@@ -182,6 +182,7 @@
 #define WszOutputDebugString OutputDebugStringW
 #define WszFindResource FindResourceW
 #define WszFindResourceEx FindResourceExW
+#define WszEnumResourceNames EnumResourceNamesW
 #define WszBeginUpdateResource BeginUpdateResourceW
 #define WszUpdateResource UpdateResourceW
 #define WszEndUpdateResource EndUpdateResourceW
