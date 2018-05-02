@@ -778,6 +778,10 @@ private:
         UnbundleDir.Append(AppName);
         UnbundleDir.Append(W("\\"));
 
+		AppPath.Set(UnbundleDir);
+		AppPath.Append(W("\\"));
+		AppPath.Append(AppName);
+
         WszCreateDirectory(UnbundleDir, NULL);
 
         PathString dir;
@@ -823,6 +827,7 @@ public:
 
     PathString AppName;
     PathString UnbundleDir;
+    PathString AppPath;
     PathString WorkingDir;
     Logger *Log;
 
@@ -877,7 +882,7 @@ int __cdecl wmain(const int argc, const wchar_t* argv[])
     Extractor extractor(&log);
     if (extractor.UnBundle())
     {
-        exeName = extractor.AppName.GetUnicode();
+        exeName = extractor.AppPath.GetUnicode();
     }
     else if (newArgc > 0)
     {
