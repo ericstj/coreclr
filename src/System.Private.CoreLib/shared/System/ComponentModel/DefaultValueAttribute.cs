@@ -22,6 +22,7 @@ namespace System.ComponentModel
         ///     This is the default value.
         /// </devdoc>
         private object _value;
+        private static Func<Type, string, object> s_convertMethod = GetConvertMethod();
 
         /// <devdoc>
         /// <para>Initializes a new instance of the <see cref='System.ComponentModel.DefaultValueAttribute'/> class, converting the
@@ -44,13 +45,41 @@ namespace System.ComponentModel
                 {
                     _value = TimeSpan.Parse(value);
                 }
-                else
+                else if (type.Module == typeof(string).Module)
                 {
                     _value = Convert.ChangeType(value, type, CultureInfo.InvariantCulture);
+                }
+                else
+                {
+                    _value = s_convertMethod(type, value);
                 }
             }
             catch
             {
+            }
+        }
+
+        private static Func<Type, string, object> GetConvertMethod()
+        {
+            var typeDescriptorType = Type.GetType(
+                "System.ComponentModel.TypeDescriptor, System, Version=0.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+                throwOnError: false);
+            var typeConverterType = Type.GetType(
+                "System.ComponentModel.TypeConverter, System, Version=0.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+                throwOnError: false);
+
+            if (typeDescriptorType != null && typeConverterType != null)
+            {
+                var typeDescriptorTypeGetConverter = typeDescriptorType.GetMethod("GetConverter", new Type[] { typeof(Type) });
+                var typeConverterConvertFromInvariantString = typeConverterType.GetMethod("ConvertFromInvariantString", new Type[] { typeof(string) });
+                return new Func<Type, string, object>((t, s) =>
+                    typeConverterConvertFromInvariantString.Invoke(
+                        typeDescriptorTypeGetConverter.Invoke(null, new[] { t }),
+                        new[] { s }));
+            }
+            else
+            {
+                return new Func<Type, string, object>((t, s) => null);
             }
         }
 
