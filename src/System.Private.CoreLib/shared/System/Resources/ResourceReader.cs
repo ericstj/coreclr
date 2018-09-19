@@ -591,7 +591,7 @@ namespace System.Resources
             }
             else
             {
-                throw new NotSupportedException(SR.NotSupported_ResourceObjectSerialization);
+                return DeserializeObject(typeIndex);
             }
         }
 
@@ -743,7 +743,56 @@ namespace System.Resources
             }
 
             // Normal serialized objects
-            throw new NotSupportedException(SR.NotSupported_ResourceObjectSerialization);
+            int typeIndex = typeCode - ResourceTypeCode.StartOfUserTypes;
+            return DeserializeObject(typeIndex);
+        }
+
+        private Func<Stream, object> _deserializeMethod;
+        // Helper method to safely deserialize a type, using a type-limiting
+        // deserialization binder to simulate a type-limiting deserializer.
+        // This method handles types that are safe to deserialize, as well as
+        // ensuring we only get back what we expect.
+        [System.Security.SecurityCritical]  // auto-generated
+        private Object DeserializeObject(int typeIndex)
+        {
+            if (_deserializeMethod == null)
+            {
+                _deserializeMethod = GetDeserializeMethod();
+            }
+            RuntimeType type = FindType(typeIndex);
+ 
+            // Ensure that the object we deserialized is exactly the same
+            // type of object we thought we should be deserializing.  This
+            // will help prevent hacked .resources files from using our
+            // serialization permission assert to deserialize anything
+            // via a hacked type ID.   
+ 
+            Object graph;
+            graph = _deserializeMethod(_store.BaseStream);
+            
+            // This check is about correctness, not security at this point.
+            if (graph.GetType() != type)
+                throw new BadImageFormatException(SR.Format(SR.BadImageFormat_ResType_SerBlobMismatch, type.FullName, graph.GetType().FullName));
+ 
+            return graph;
+        }
+
+        private static Func<Stream, object> GetDeserializeMethod()
+        {
+            var binaryFormatterType = Type.GetType(
+                "System.Runtime.Serialization.Formatters.Binary.BinaryFormatter, mscorlib, Version=0.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089",
+                throwOnError: false);
+            if (binaryFormatterType != null)
+            {
+                var binaryFormatterCtor = binaryFormatterType.GetConstructor(new Type[0]);
+                var binaryFormatterDeserialize = binaryFormatterType.GetMethod("Deserialize", new Type[] { typeof(Stream) });
+                var binaryFormatter = binaryFormatterCtor.Invoke(new object[0]);
+                return (Func<Stream, object>)binaryFormatterDeserialize.CreateDelegate(typeof(Func<Stream, object>), binaryFormatter);
+            }
+            else
+            {
+                return new Func<Stream, object>(s => throw new NotSupportedException(SR.NotSupported_ResourceObjectSerialization));
+            }
         }
 
         // Reads in the header information for a .resources file.  Verifies some
