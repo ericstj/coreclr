@@ -98,7 +98,7 @@ namespace System.Resources
         private int[] _typeNamePositions;  // To delay initialize type table
         private int _numResources;    // Num of resources files, in case arrays aren't allocated.
 
-        private bool _permitDeserialization;  // bool indicating if this ResourceReader deserialize BinaryFormatted resources
+        private readonly bool _permitDeserialization;  // can deserialize BinaryFormatted resources
         private object _binaryFormatter; // binary formatter instance to use for deserializing
 
         // statics used to dynamically call into BinaryFormatter
@@ -106,8 +106,8 @@ namespace System.Resources
         // and s_deserializeMethod will point to an unbound delegate to the deserialize method.
         // When it cannot be located s_binaryFormatterType will point to typeof(object) and 
         // s_deserializeMethod will be null.
-        private static Type s_binaryFormatterType;
-        private static Func<object, Stream, object> s_deserializeMethod;
+        private static volatile Type s_binaryFormatterType;
+        private static volatile Func<object, Stream, object> s_deserializeMethod;
 
 
 
@@ -762,8 +762,7 @@ namespace System.Resources
             return DeserializeObject(typeIndex);
         }
 
-        // Helper method to deserialize a type
-        private Object DeserializeObject(int typeIndex)
+        private object DeserializeObject(int typeIndex)
         {
             if (!_permitDeserialization)
             {
@@ -776,13 +775,10 @@ namespace System.Resources
             }
 
             Type type = FindType(typeIndex);
- 
-            // Ensure that the object we deserialized is exactly the same
-            // type of object we thought we should be deserializing. 
-            Object graph;
-            graph = s_deserializeMethod(_binaryFormatter, _store.BaseStream);
+  
+            object graph = s_deserializeMethod(_binaryFormatter, _store.BaseStream);
             
-            // This check is about correctness, not security at this point.
+            // guard against corrupted resources
             if (graph.GetType() != type)
                 throw new BadImageFormatException(SR.Format(SR.BadImageFormat_ResType_SerBlobMismatch, type.FullName, graph.GetType().FullName));
  
@@ -795,31 +791,17 @@ namespace System.Resources
             {
                 Type binaryFormatterType = Type.GetType(
                     "System.Runtime.Serialization.Formatters.Binary.BinaryFormatter, System.Runtime.Serialization.Formatters, Version=0.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a",
-                    throwOnError: false);
-                if (binaryFormatterType != null)
-                {
-                    ConstructorInfo binaryFormatterCtor = binaryFormatterType.GetConstructor(new Type[0]);
-                    MethodInfo binaryFormatterDeserialize = binaryFormatterType.GetMethod("Deserialize", new Type[] { typeof(Stream) });
+                    throwOnError: true);
 
-                    s_binaryFormatterType = binaryFormatterType;
-                    // create an unbound delegate that can accept a BinaryFormatter instance as object
-                    s_deserializeMethod = (Func<object, Stream, object>)typeof(ResourceReader)
-                                           .GetMethod(nameof(CreateUntypedDelegate), BindingFlags.NonPublic | BindingFlags.Static)
-                                           .MakeGenericMethod(binaryFormatterType)
-                                           .Invoke(null, new object[] { binaryFormatterDeserialize });
-                }
-                else
-                {
-                    // set a sentinel to indicate that BinaryFormatter wasn't found
-                    s_binaryFormatterType = typeof(object);
-                    s_deserializeMethod = null;
-                }
-            }
+                ConstructorInfo binaryFormatterCtor = binaryFormatterType.GetConstructor(new Type[0]);
+                MethodInfo binaryFormatterDeserialize = binaryFormatterType.GetMethod("Deserialize", new Type[] { typeof(Stream) });
 
-            if (s_binaryFormatterType != null && s_deserializeMethod == null)
-            {
-                // we couldn't find the type
-                throw new NotSupportedException(SR.NotSupported_ResourceObjectSerialization);
+                // create an unbound delegate that can accept a BinaryFormatter instance as object
+                s_deserializeMethod = (Func<object, Stream, object>)typeof(ResourceReader)
+                                        .GetMethod(nameof(CreateUntypedDelegate), BindingFlags.NonPublic | BindingFlags.Static)
+                                        .MakeGenericMethod(binaryFormatterType)
+                                        .Invoke(null, new object[] { binaryFormatterDeserialize });
+                s_binaryFormatterType = binaryFormatterType;
             }
 
             _binaryFormatter = Activator.CreateInstance(s_binaryFormatterType);
